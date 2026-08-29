@@ -4,6 +4,13 @@ use Illuminate\Support\Facades\Route;
 use Liberu\RealEstate\PropertiesApi\Http\Controllers\PropertyController;
 use Liberu\RealEstate\PropertiesApi\Http\Controllers\PropertyCategoryController;
 use Liberu\RealEstate\PropertiesApi\Http\Controllers\PropertyTemplateController;
+use Liberu\RealEstate\PropertiesApi\Http\Controllers\PropertySavedSearchController;
+
+Route::prefix('api/v1/real-estate/property-saved-searches')->middleware(['api', 'auth:sanctum', 'throttle:api', 'api.idempotency'])->group(function (): void {
+    Route::get('/', [PropertySavedSearchController::class, 'index'])->name('real-estate.property-saved-searches.index');
+    Route::post('/', [PropertySavedSearchController::class, 'store'])->name('real-estate.property-saved-searches.store');
+    Route::delete('/{savedSearch}', [PropertySavedSearchController::class, 'destroy'])->name('real-estate.property-saved-searches.destroy');
+});
 
 Route::prefix('api/v1/real-estate/properties')->middleware(['api', 'auth:sanctum', 'throttle:api', 'api.idempotency'])->group(function (): void {
     Route::get('/', [PropertyController::class, 'index'])->name('real-estate.properties.index');

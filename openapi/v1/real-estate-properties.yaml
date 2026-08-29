@@ -5,6 +5,11 @@ info:
 security: [{sanctum: []}]
 x-liberu-idempotency-header: Idempotency-Key
 paths:
+  /api/v1/real-estate/property-saved-searches:
+    get: {operationId: real.estate.properties.savedSearches, security: [{sanctum: []}], responses: {'200': {description: Paginated saved searches}}}
+    post: {operationId: real.estate.properties.saveSearch, security: [{sanctum: []}], requestBody: {required: true, content: {application/json: {schema: {type: object, required: [name, criteria], properties: {name: {type: string}, criteria: {type: object, additionalProperties: true}}}}}}, responses: {'201': {description: Saved search created}}}
+  /api/v1/real-estate/property-saved-searches/{savedSearch}:
+    delete: {operationId: real.estate.properties.deleteSavedSearch, security: [{sanctum: []}], responses: {'200': {description: Saved search deleted}}}
   /api/v1/real-estate/properties:
     get:
       operationId: real.estate.properties.list
