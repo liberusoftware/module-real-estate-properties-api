@@ -11,16 +11,24 @@ use Illuminate\Validation\Rule;
 use Liberu\RealEstate\Properties\Application\CreateProperty;
 use Liberu\RealEstate\Properties\Application\DeleteProperty;
 use Liberu\RealEstate\Properties\Application\EstimatePropertyTax;
+use Liberu\RealEstate\Properties\Application\FetchWalkabilityScores;
+use Liberu\RealEstate\Properties\Application\GeneratePropertyQrCode;
 use Liberu\RealEstate\Properties\Application\RecordPropertyKey;
-use Liberu\RealEstate\Properties\Application\TransitionProperty;
-use Liberu\RealEstate\Properties\Application\TogglePropertyFavorite;
 use Liberu\RealEstate\Properties\Application\RemovePropertyFavorite;
+use Liberu\RealEstate\Properties\Application\SendPropertyToFriend;
+use Liberu\RealEstate\Properties\Application\TogglePropertyFavorite;
+use Liberu\RealEstate\Properties\Application\TransitionProperty;
 use Liberu\RealEstate\Properties\Application\UpdateProperty;
 use Liberu\RealEstate\Properties\Application\UpsertPropertyUnit;
+use Liberu\RealEstate\Properties\Domain\DealType;
 use Liberu\RealEstate\Properties\Domain\PropertyStatus;
 use Liberu\RealEstate\Properties\Models\Property;
+use Liberu\RealEstate\Properties\Models\PropertyHistory;
+use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyHistoryResource;
 use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyKeyResource;
+use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyQrCodeResource;
 use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyResource;
+use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyShareResource;
 use Liberu\RealEstate\PropertiesApi\Http\Resources\PropertyUnitResource;
 
 final class PropertyController
@@ -72,7 +80,7 @@ final class PropertyController
             ->postalCode($filters['postal_code'] ?? null)
             ->when($filters['needs_syncing'] ?? false, fn ($query) => $query->needsSyncing())
             ->hasAmenities($filters['amenities'] ?? [])
-            ->when($filters['latitude'] !== null && $filters['longitude'] !== null && $filters['radius'] !== null, fn ($query) => $query->nearby($filters['latitude'], $filters['longitude'], $filters['radius']))
+            ->when(($filters['latitude'] ?? null) !== null && ($filters['longitude'] ?? null) !== null && ($filters['radius'] ?? null) !== null, fn ($query) => $query->nearby($filters['latitude'], $filters['longitude'], $filters['radius']))
             ->when(array_key_exists('branch_id', $filters), fn ($query) => $query->where('branch_id', $filters['branch_id']))
             ->priceRange($filters['min_price'] ?? null, $filters['max_price'] ?? null)
             ->bedrooms($filters['min_bedrooms'] ?? null, $filters['max_bedrooms'] ?? null)
@@ -100,6 +108,12 @@ final class PropertyController
         $validated = $request->validate([
             'address' => ['required', 'string', 'max:500'],
             'branch_id' => ['sometimes', 'nullable', 'integer', Rule::exists('real_estate_branches', 'id')->where('team_id', $request->user()?->current_team_id)],
+            'region_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_regions,id'],
+            'city_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_cities,id'],
+            'district_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_districts,id'],
+            'agent_id' => ['sometimes', 'nullable', 'integer', Rule::exists('team_user', 'user_id')->where('team_id', $request->user()?->current_team_id)],
+            'territory_id' => ['sometimes', 'nullable', 'integer', Rule::exists('real_estate_territories', 'id')->where('team_id', $request->user()?->current_team_id)],
+            'deal_type' => ['sometimes', Rule::enum(DealType::class)],
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'description' => ['sometimes', 'nullable', 'string'],
             'description_generated_at' => ['sometimes', 'nullable', 'date'],
@@ -142,6 +156,13 @@ final class PropertyController
             'sold_date' => ['sometimes', 'nullable', 'date', 'after_or_equal:list_date'],
             'last_synced_at' => ['sometimes', 'nullable', 'date'],
             'is_featured' => ['sometimes', 'boolean'],
+            'has_generator' => ['sometimes', 'boolean'],
+            'has_wifi' => ['sometimes', 'boolean'],
+            'has_parking' => ['sometimes', 'boolean'],
+            'mountain_view' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'altitude' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'water_source' => ['sometimes', 'nullable', Rule::in(['well', 'river', 'spring', 'other'])],
+            'max_guests' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'live_tour_available' => ['sometimes', 'boolean'],
             'ar_tour_enabled' => ['sometimes', 'boolean'],
             'ar_tour_settings' => ['sometimes', 'array'],
@@ -184,8 +205,15 @@ final class PropertyController
     {
         $user = $request->user();
         abort_unless($user?->current_team_id !== null, 403);
-        $filters = $request->validate(['search' => ['sometimes', 'nullable', 'string', 'max:255'], 'sort_by' => ['sometimes', 'nullable', Rule::in(['created_at', 'updated_at', 'price', 'year_built', 'bedrooms', 'bathrooms', 'area_sqft', 'address'])], 'sort_direction' => ['sometimes', 'nullable', Rule::in(['asc', 'desc'])], 'page_size' => ['sometimes', 'integer', 'min:1', 'max:100']]);
-        $query = Property::query()->forTeam($user->current_team_id)->favoritedBy($user->current_team_id, $user->getAuthIdentifier())->search($filters['search'] ?? null);
+        $filters = $request->validate([
+            'search' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'sort_by' => ['sometimes', 'nullable', Rule::in(['created_at', 'updated_at', 'price', 'year_built', 'bedrooms', 'bathrooms', 'area_sqft', 'address'])],
+            'sort_direction' => ['sometimes', 'nullable', Rule::in(['asc', 'desc'])],
+            'page_size' => ['sometimes', 'integer', 'min:1', 'max:100'],
+        ]);
+        $query = Property::query()->forTeam($user->current_team_id)
+            ->favoritedBy($user->current_team_id, $user->getAuthIdentifier())
+            ->search($filters['search'] ?? null);
 
         return PropertyResource::collection($query->sorted($filters['sort_by'] ?? 'created_at', $filters['sort_direction'] ?? 'desc')->paginate($filters['page_size'] ?? 12)->withQueryString())->response();
     }
@@ -206,6 +234,52 @@ final class PropertyController
         return PropertyResource::collection($property->similarProperties($limit))->response();
     }
 
+    public function walkability(Request $request, Property $property, FetchWalkabilityScores $fetch, UpdateProperty $update): JsonResponse
+    {
+        $user = $request->user();
+        abort_unless($user?->current_team_id === $property->team_id, 404);
+
+        if ($property->latitude === null || $property->longitude === null) {
+            return response()->json(['message' => 'The property needs latitude and longitude before walkability can be fetched.'], 422);
+        }
+
+        $scores = $fetch->handle($property->address, (float) $property->latitude, (float) $property->longitude);
+        $updatedProperty = $update->handle($property->team_id, $user->getAuthIdentifier(), $property->getKey(), $scores + ['walkability_updated_at' => now()]);
+
+        return (new PropertyResource($updatedProperty))->response();
+    }
+
+    public function qrCode(Request $request, Property $property, GeneratePropertyQrCode $generate): JsonResponse
+    {
+        $user = $request->user();
+        abort_unless($user?->current_team_id === $property->team_id, 404);
+        $validated = $request->validate(['size' => ['sometimes', 'integer', 'min:50', 'max:1000']]);
+
+        return (new PropertyQrCodeResource($generate->forProperty($property, $request->integer('size', 200))))->response();
+    }
+
+    public function share(Request $request, Property $property, SendPropertyToFriend $send): JsonResponse
+    {
+        $user = $request->user();
+        abort_unless($user?->current_team_id === $property->team_id, 404);
+        $validated = $request->validate([
+            'recipient_email' => ['required', 'email', 'max:255'],
+            'recipient_name' => ['required', 'string', 'max:120'],
+            'sender_name' => ['required', 'string', 'max:120'],
+            'sender_email' => ['required', 'email', 'max:255'],
+            'personal_message' => ['sometimes', 'nullable', 'string', 'max:2000'],
+        ]);
+
+        return (new PropertyShareResource($send->handle(
+            $property,
+            $validated['recipient_email'],
+            $validated['recipient_name'],
+            $validated['sender_name'],
+            $validated['sender_email'],
+            $validated['personal_message'] ?? null,
+        )))->response();
+    }
+
     public function compare(Request $request): JsonResponse
     {
         $teamId = $request->user()?->current_team_id;
@@ -216,10 +290,16 @@ final class PropertyController
             'property_ids.*' => ['integer', 'distinct'],
         ]);
 
-        $properties = Property::query()->forTeam($teamId)->whereIn('id', $validated['property_ids'])->get()->keyBy(fn (Property $property): string => (string) $property->getKey());
+        $properties = Property::query()
+            ->forTeam($teamId)
+            ->whereIn('id', $validated['property_ids'])
+            ->get()
+            ->keyBy(fn (Property $property): string => (string) $property->getKey());
+
         abort_unless($properties->count() === count($validated['property_ids']), 404);
 
-        $ordered = collect($validated['property_ids'])->map(fn (int $id): Property => $properties->get((string) $id));
+        $ordered = collect($validated['property_ids'])
+            ->map(fn (int $id): Property => $properties->get((string) $id));
 
         return PropertyResource::collection($ordered)->response();
     }
@@ -250,6 +330,24 @@ final class PropertyController
         return (new PropertyResource($property->load('history')))->response();
     }
 
+    public function history(Request $request, Property $property): JsonResponse
+    {
+        abort_unless($request->user()?->current_team_id === $property->team_id, 404);
+        $filters = $request->validate([
+            'event' => ['sometimes', 'nullable', 'string', 'max:80'],
+            'limit' => ['sometimes', 'integer', 'min:1', 'max:100'],
+        ]);
+
+        $history = PropertyHistory::query()
+            ->where('property_id', $property->getKey())
+            ->when($filters['event'] ?? null, fn ($query, string $event) => $query->byType($event))
+            ->latest()
+            ->limit($filters['limit'] ?? 50)
+            ->get();
+
+        return PropertyHistoryResource::collection($history)->response();
+    }
+
     public function update(Request $request, Property $property, UpdateProperty $update): JsonResponse
     {
         $user = $request->user();
@@ -258,6 +356,12 @@ final class PropertyController
         $validated = $request->validate([
             'address' => ['sometimes', 'string', 'max:500'],
             'branch_id' => ['sometimes', 'nullable', 'integer', Rule::exists('real_estate_branches', 'id')->where('team_id', $request->user()?->current_team_id)],
+            'region_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_regions,id'],
+            'city_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_cities,id'],
+            'district_id' => ['sometimes', 'nullable', 'integer', 'exists:real_estate_districts,id'],
+            'agent_id' => ['sometimes', 'nullable', 'integer', Rule::exists('team_user', 'user_id')->where('team_id', $request->user()?->current_team_id)],
+            'territory_id' => ['sometimes', 'nullable', 'integer', Rule::exists('real_estate_territories', 'id')->where('team_id', $request->user()?->current_team_id)],
+            'deal_type' => ['sometimes', Rule::enum(DealType::class)],
             'title' => ['sometimes', 'nullable', 'string', 'max:255'],
             'description' => ['sometimes', 'nullable', 'string'],
             'description_generated_at' => ['sometimes', 'nullable', 'date'],
@@ -300,6 +404,13 @@ final class PropertyController
             'sold_date' => ['sometimes', 'nullable', 'date', 'after_or_equal:list_date'],
             'last_synced_at' => ['sometimes', 'nullable', 'date'],
             'is_featured' => ['sometimes', 'boolean'],
+            'has_generator' => ['sometimes', 'boolean'],
+            'has_wifi' => ['sometimes', 'boolean'],
+            'has_parking' => ['sometimes', 'boolean'],
+            'mountain_view' => ['sometimes', 'nullable', 'string', 'max:120'],
+            'altitude' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'water_source' => ['sometimes', 'nullable', Rule::in(['well', 'river', 'spring', 'other'])],
+            'max_guests' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'live_tour_available' => ['sometimes', 'boolean'],
             'ar_tour_enabled' => ['sometimes', 'boolean'],
             'ar_tour_settings' => ['sometimes', 'array'],
